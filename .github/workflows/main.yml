@@ -1,0 +1,77 @@
+# .github/workflows/chrome-remote-desktop.yml
+name: Chrome Remote Desktop (RDP)
+
+on:
+  workflow_dispatch:
+    inputs:
+      hours:
+        description: "مدة التشغيل بالساعات"
+        required: false
+        default: "6"
+
+jobs:
+  crd:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: معلومات الوصول
+        run: |
+          echo "بعد اكتمال الإعداد افتح: https://remotedesktop.google.com/access"
+
+      - name: تثبيت سطح مكتب XFCE والمتطلبات
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            xfce4 xfce4-goodies \
+            xorg dbus-x11 x11-xserver-utils \
+            xserver-xorg-video-dummy \
+            desktop-base \
+            wget curl sudo
+
+      - name: تثبيت Google Chrome
+        run: |
+          wget -q -O /tmp/google-chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+          sudo apt-get install -y /tmp/google-chrome.deb
+
+      - name: تثبيت Chrome Remote Desktop
+        run: |
+          wget -q -O /tmp/crd.deb https://dl.google.com/linux/direct/chrome-remote-desktop_current_amd64.deb
+          sudo apt-get install -y /tmp/crd.deb
+
+      - name: إعداد جلسة Chrome Remote Desktop
+        run: |
+          echo 'exec /usr/bin/startxfce4' > "$HOME/.chrome-remote-desktop-session"
+          chmod +x "$HOME/.chrome-remote-desktop-session"
+          sudo usermod -aG chrome-remote-desktop "$USER" || true
+
+      # المطلوب: أضف Secret في GitHub باسم CRD_COMMAND
+      # القيمة: أمر التفويض الكامل من https://remotedesktop.google.com/headless (خيار Debian/Linux)
+      # مثال تقريبي للأمر (انسخ الأمر الفعلي كما يظهر لك):
+      # DISPLAY= /opt/google/chrome-remote-desktop/start-host --code="4/XXXX" --redirect-url="https://remotedesktop.google.com/_/oauthredirect" --name="$(hostname)" --pin="123456"
+      # ملاحظة: يجب أن يتضمن الأمر رمز PIN (6 أرقام أو أكثر) إن لم يطلبه بشكل تفاعلي. إن كان الأمر لا يقبل --pin، عدّل الخطوة لتمرير PIN حسب الصيغة الحالية.
+      - name: تسجيل المضيف وبدء الخدمة
+        env:
+          CRD_COMMAND: ${{ secrets.CRD_COMMAND }}
+        run: |
+          if [ -z "$CRD_COMMAND" ]; then
+            echo "CRD_COMMAND secret is missing"
+            exit 1
+          fi
+          sudo systemctl stop chrome-remote-desktop@"$USER" 2>/dev/null || true
+          sudo systemctl stop chrome-remote-desktop 2>/dev/null || true
+          # تشغيل أمر التفويض (قد يحتاج sudo حسب الأمر المُولد)
+          bash -lc "$CRD_COMMAND"
+          sudo systemctl enable chrome-remote-desktop@"$USER" 2>/dev/null || true
+          sudo systemctl start chrome-remote-desktop@"$USER" 2>/dev/null || sudo systemctl start chrome-remote-desktop 2>/dev/null || true
+          sleep 10
+          sudo systemctl status chrome-remote-desktop@"$USER" --no-pager 2>/dev/null || sudo systemctl status chrome-remote-desktop --no-pager 2>/dev/null || true
+
+      - name: إبقاء الجلسة نشطة
+        env:
+          HOURS: ${{ github.event.inputs.hours }}
+        run: |
+          echo "الوصول من: https://remotedesktop.google.com/access"
+          SECONDS_TOTAL=$(awk "BEGIN {print int(${HOURS:-6} * 3600)}")
+          echo "سيبقى الـ Runner نشطًا لمدة ${HOURS:-6} ساعة/ساعات"
+          sleep "$SECONDS_TOTAL"
