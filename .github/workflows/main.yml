@@ -4,10 +4,24 @@ name: Chrome Remote Desktop (RDP)
 on:
   workflow_dispatch:
     inputs:
-      hours:
-        description: "مدة التشغيل بالساعات"
+      windows_auth_command:
+        description: 'ألصق أمر Windows الكامل من Google (remoting_start_host.exe --code="..." --redirect-url="..." --name=...)'
+        required: true
+        type: string
+      pin:
+        description: 'رمز PIN (6 أرقام أو أكثر) للوصول عن بُعد'
+        required: true
+        type: string
+      device_name:
+        description: 'اسم الجهاز (اختياري)'
         required: false
-        default: "6"
+        default: 'github-actions-crd'
+        type: string
+      hours:
+        description: 'مدة التشغيل بالساعات'
+        required: false
+        default: '6'
+        type: string
 
 jobs:
   crd:
@@ -27,7 +41,7 @@ jobs:
             xorg dbus-x11 x11-xserver-utils \
             xserver-xorg-video-dummy \
             desktop-base \
-            wget curl sudo
+            wget curl python3
 
       - name: تثبيت Google Chrome
         run: |
@@ -45,33 +59,64 @@ jobs:
           chmod +x "$HOME/.chrome-remote-desktop-session"
           sudo usermod -aG chrome-remote-desktop "$USER" || true
 
-      # المطلوب: أضف Secret في GitHub باسم CRD_COMMAND
-      # القيمة: أمر التفويض الكامل من https://remotedesktop.google.com/headless (خيار Debian/Linux)
-      # مثال تقريبي للأمر (انسخ الأمر الفعلي كما يظهر لك):
-      # DISPLAY= /opt/google/chrome-remote-desktop/start-host --code="4/XXXX" --redirect-url="https://remotedesktop.google.com/_/oauthredirect" --name="$(hostname)" --pin="123456"
-      # ملاحظة: يجب أن يتضمن الأمر رمز PIN (6 أرقام أو أكثر) إن لم يطلبه بشكل تفاعلي. إن كان الأمر لا يقبل --pin، عدّل الخطوة لتمرير PIN حسب الصيغة الحالية.
-      - name: تسجيل المضيف وبدء الخدمة
+      - name: استخراج بيانات التفويض وتسجيل المضيف
         env:
-          CRD_COMMAND: ${{ secrets.CRD_COMMAND }}
+          WINDOWS_AUTH_COMMAND: ${{ inputs.windows_auth_command }}
+          CRD_PIN: ${{ inputs.pin }}
+          CRD_NAME: ${{ inputs.device_name }}
         run: |
-          if [ -z "$CRD_COMMAND" ]; then
-            echo "CRD_COMMAND secret is missing"
+          set -euo pipefail
+
+          if [ -z "${WINDOWS_AUTH_COMMAND:-}" ]; then
+            echo "لم يتم إدخال أمر التفويض."
             exit 1
           fi
+          if [ -z "${CRD_PIN:-}" ]; then
+            echo "لم يتم إدخال رمز PIN."
+            exit 1
+          fi
+
+          read -r CODE REDIRECT_URL <<< "$(python3 - <<'PY'
+          import os, re, shlex
+          s = os.environ.get("WINDOWS_AUTH_COMMAND", "")
+          code = ""
+          redirect = "https://remotedesktop.google.com/_/oauthredirect"
+          m = re.search(r'--code="?([^"\s]+)"?', s)
+          if m: code = m.group(1)
+          m = re.search(r'--redirect-url="?([^"\s]+)"?', s)
+          if m: redirect = m.group(1)
+          print(code, redirect)
+          PY
+          )"
+
+          if [ -z "${CODE:-}" ]; then
+            echo "تعذر استخراج --code من الأمر المُدخل."
+            exit 1
+          fi
+
+          NAME="${CRD_NAME:-github-actions-crd}"
+
           sudo systemctl stop chrome-remote-desktop@"$USER" 2>/dev/null || true
           sudo systemctl stop chrome-remote-desktop 2>/dev/null || true
-          # تشغيل أمر التفويض (قد يحتاج sudo حسب الأمر المُولد)
-          bash -lc "$CRD_COMMAND"
+
+          # تسجيل المضيف على Linux باستخدام الكود المستخرج من أمر Windows
+          DISPLAY= /opt/google/chrome-remote-desktop/start-host \
+            --code="$CODE" \
+            --redirect-url="$REDIRECT_URL" \
+            --name="$NAME" \
+            --pin="$CRD_PIN"
+
           sudo systemctl enable chrome-remote-desktop@"$USER" 2>/dev/null || true
           sudo systemctl start chrome-remote-desktop@"$USER" 2>/dev/null || sudo systemctl start chrome-remote-desktop 2>/dev/null || true
+
           sleep 10
           sudo systemctl status chrome-remote-desktop@"$USER" --no-pager 2>/dev/null || sudo systemctl status chrome-remote-desktop --no-pager 2>/dev/null || true
 
       - name: إبقاء الجلسة نشطة
         env:
-          HOURS: ${{ github.event.inputs.hours }}
+          HOURS: ${{ inputs.hours }}
         run: |
-          echo "الوصول من: https://remotedesktop.google.com/access"
+          echo "افتح للوصول إلى الجهاز: https://remotedesktop.google.com/access"
           SECONDS_TOTAL=$(awk "BEGIN {print int(${HOURS:-6} * 3600)}")
           echo "سيبقى الـ Runner نشطًا لمدة ${HOURS:-6} ساعة/ساعات"
           sleep "$SECONDS_TOTAL"
