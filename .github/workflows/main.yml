@@ -1,5 +1,5 @@
-# .github/workflows/chrome-remote-desktop.yml
-name: Chrome Remote Desktop (RDP)
+# .github/workflows/chrome-remote-desktop-windows.yml
+name: Chrome Remote Desktop (Windows RDP)
 
 on:
   workflow_dispatch:
@@ -12,11 +12,6 @@ on:
         description: 'رمز PIN (6 أرقام أو أكثر) للوصول عن بُعد'
         required: true
         type: string
-      device_name:
-        description: 'اسم الجهاز (اختياري)'
-        required: false
-        default: 'github-actions-crd'
-        type: string
       hours:
         description: 'مدة التشغيل بالساعات'
         required: false
@@ -25,98 +20,78 @@ on:
 
 jobs:
   crd:
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     timeout-minutes: 360
 
     steps:
       - name: معلومات الوصول
+        shell: pwsh
         run: |
-          echo "بعد اكتمال الإعداد افتح: https://remotedesktop.google.com/access"
-
-      - name: تثبيت سطح مكتب XFCE والمتطلبات
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            xfce4 xfce4-goodies \
-            xorg dbus-x11 x11-xserver-utils \
-            xserver-xorg-video-dummy \
-            desktop-base \
-            wget curl python3
+          Write-Host "بعد اكتمال الإعداد افتح: https://remotedesktop.google.com/access"
 
       - name: تثبيت Google Chrome
+        shell: pwsh
         run: |
-          wget -q -O /tmp/google-chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
-          sudo apt-get install -y /tmp/google-chrome.deb
+          $ErrorActionPreference = "Stop"
+          $chromeInstaller = "$env:RUNNER_TEMP\chrome_installer.exe"
+          Invoke-WebRequest -Uri "https://dl.google.com/chrome/install/latest/chrome_installer.exe" -OutFile $chromeInstaller
+          Start-Process -FilePath $chromeInstaller -Args "/silent /install" -Wait
 
-      - name: تثبيت Chrome Remote Desktop
+      - name: تثبيت Chrome Remote Desktop Host
+        shell: pwsh
         run: |
-          wget -q -O /tmp/crd.deb https://dl.google.com/linux/direct/chrome-remote-desktop_current_amd64.deb
-          sudo apt-get install -y /tmp/crd.deb
+          $ErrorActionPreference = "Stop"
+          $crdInstaller = "$env:RUNNER_TEMP\chromeremotedesktophost.msi"
+          Invoke-WebRequest -Uri "https://dl.google.com/edgedl/chrome-remote-desktop/chromeremotedesktophost.msi" -OutFile $crdInstaller
+          Start-Process msiexec.exe -Wait -ArgumentList "/i `"$crdInstaller`" /qn"
 
-      - name: إعداد جلسة Chrome Remote Desktop
-        run: |
-          echo 'exec /usr/bin/startxfce4' > "$HOME/.chrome-remote-desktop-session"
-          chmod +x "$HOME/.chrome-remote-desktop-session"
-          sudo usermod -aG chrome-remote-desktop "$USER" || true
-
-      - name: استخراج بيانات التفويض وتسجيل المضيف
+      - name: تسجيل المضيف وبدء الخدمة
+        shell: pwsh
         env:
           WINDOWS_AUTH_COMMAND: ${{ inputs.windows_auth_command }}
           CRD_PIN: ${{ inputs.pin }}
-          CRD_NAME: ${{ inputs.device_name }}
         run: |
-          set -euo pipefail
+          $ErrorActionPreference = "Stop"
 
-          if [ -z "${WINDOWS_AUTH_COMMAND:-}" ]; then
-            echo "لم يتم إدخال أمر التفويض."
-            exit 1
-          fi
-          if [ -z "${CRD_PIN:-}" ]; then
-            echo "لم يتم إدخال رمز PIN."
-            exit 1
-          fi
+          $cmd = $env:WINDOWS_AUTH_COMMAND
+          $pin = $env:CRD_PIN
 
-          read -r CODE REDIRECT_URL <<< "$(python3 - <<'PY'
-          import os, re, shlex
-          s = os.environ.get("WINDOWS_AUTH_COMMAND", "")
-          code = ""
-          redirect = "https://remotedesktop.google.com/_/oauthredirect"
-          m = re.search(r'--code="?([^"\s]+)"?', s)
-          if m: code = m.group(1)
-          m = re.search(r'--redirect-url="?([^"\s]+)"?', s)
-          if m: redirect = m.group(1)
-          print(code, redirect)
-          PY
-          )"
+          if ([string]::IsNullOrWhiteSpace($cmd)) { throw "لم يتم إدخال أمر التفويض." }
+          if ([string]::IsNullOrWhiteSpace($pin)) { throw "لم يتم إدخال رمز PIN." }
 
-          if [ -z "${CODE:-}" ]; then
-            echo "تعذر استخراج --code من الأمر المُدخل."
-            exit 1
-          fi
+          $codeMatch = [regex]::Match($cmd, '--code="?([^"\s]+)"?')
+          $redirectMatch = [regex]::Match($cmd, '--redirect-url="?([^"\s]+)"?')
 
-          NAME="${CRD_NAME:-github-actions-crd}"
+          if (-not $codeMatch.Success) { throw "تعذر استخراج --code من الأمر المُدخل." }
 
-          sudo systemctl stop chrome-remote-desktop@"$USER" 2>/dev/null || true
-          sudo systemctl stop chrome-remote-desktop 2>/dev/null || true
+          $code = $codeMatch.Groups[1].Value
+          $redirectUrl = if ($redirectMatch.Success) { $redirectMatch.Groups[1].Value } else { "https://remotedesktop.google.com/_/oauthredirect" }
+          $name = $env:COMPUTERNAME
 
-          # تسجيل المضيف على Linux باستخدام الكود المستخرج من أمر Windows
-          DISPLAY= /opt/google/chrome-remote-desktop/start-host \
-            --code="$CODE" \
-            --redirect-url="$REDIRECT_URL" \
-            --name="$NAME" \
-            --pin="$CRD_PIN"
+          $hostExe = "${env:ProgramFiles(x86)}\Google\Chrome Remote Desktop\CurrentVersion\remoting_start_host.exe"
+          if (-not (Test-Path $hostExe)) {
+            $hostExe = "${env:ProgramFiles}\Google\Chrome Remote Desktop\CurrentVersion\remoting_start_host.exe"
+          }
+          if (-not (Test-Path $hostExe)) { throw "لم يتم العثور على remoting_start_host.exe" }
 
-          sudo systemctl enable chrome-remote-desktop@"$USER" 2>/dev/null || true
-          sudo systemctl start chrome-remote-desktop@"$USER" 2>/dev/null || sudo systemctl start chrome-remote-desktop 2>/dev/null || true
+          & $hostExe --code="$code" --redirect-url="$redirectUrl" --name="$name" --pin="$pin"
 
-          sleep 10
-          sudo systemctl status chrome-remote-desktop@"$USER" --no-pager 2>/dev/null || sudo systemctl status chrome-remote-desktop --no-pager 2>/dev/null || true
+          $service = Get-Service -Name "chromoting" -ErrorAction SilentlyContinue
+          if ($service) {
+            if ($service.Status -ne "Running") { Start-Service -Name "chromoting" }
+            Get-Service -Name "chromoting" | Format-List *
+          } else {
+            Write-Host "لم يتم العثور على خدمة chromoting بالاسم المتوقع، قد تكون الخدمة بدأت باسم مختلف."
+            Get-Service | Where-Object { $_.Name -like "*chrome*" -or $_.DisplayName -like "*Chrome Remote*" } | Format-Table -AutoSize
+          }
 
       - name: إبقاء الجلسة نشطة
+        shell: pwsh
         env:
           HOURS: ${{ inputs.hours }}
         run: |
-          echo "افتح للوصول إلى الجهاز: https://remotedesktop.google.com/access"
-          SECONDS_TOTAL=$(awk "BEGIN {print int(${HOURS:-6} * 3600)}")
-          echo "سيبقى الـ Runner نشطًا لمدة ${HOURS:-6} ساعة/ساعات"
-          sleep "$SECONDS_TOTAL"
+          $hours = [double]::Parse($(if ($env:HOURS) { $env:HOURS } else { "6" }))
+          $seconds = [int]($hours * 3600)
+          Write-Host "افتح للوصول إلى الجهاز: https://remotedesktop.google.com/access"
+          Write-Host "سيبقى الـ Runner نشطًا لمدة $hours ساعة/ساعات"
+          Start-Sleep -Seconds $seconds
